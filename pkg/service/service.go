@@ -25,8 +25,6 @@ import (
 	"github.com/storacha/indexing-service/pkg/types"
 )
 
-const defaultConcurrency = 5
-
 // Match narrows parameters for locating providers/claims for a set of multihashes
 type Match struct {
 	Subject []did.DID

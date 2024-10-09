@@ -1,0 +1,5 @@
+/.vscode
+
+/cmd/indexing-service
+/indexing-service
+*.car

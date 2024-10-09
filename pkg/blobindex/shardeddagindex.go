@@ -179,7 +179,7 @@ func Archive(model ShardedDagIndex) (io.Reader, error) {
 	blobIndexDatas, err := toList(model.Shards(), func(shardHash mh.Multihash, shard MultihashMap[Position]) (dm.BlobIndexModel, error) {
 		// assemble blob slices
 		blobSliceDatas, err := toList(shard, func(sliceHash mh.Multihash, pos Position) (dm.BlobSliceModel, error) {
-			return dm.BlobSliceModel{sliceHash, pos}, nil
+			return dm.BlobSliceModel{Multihash: sliceHash, Position: pos}, nil
 		})
 		if err != nil {
 			return dm.BlobIndexModel{}, err

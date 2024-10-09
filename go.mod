@@ -75,7 +75,7 @@ require (
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
 	github.com/multiformats/go-multiaddr-fmt v0.1.0 // indirect
-	github.com/multiformats/go-multibase v0.2.0 // indirect
+	github.com/multiformats/go-multibase v0.2.0
 	github.com/multiformats/go-multistream v0.5.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

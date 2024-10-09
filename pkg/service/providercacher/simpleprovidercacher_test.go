@@ -170,8 +170,3 @@ func (m *MockProviderStore) Set(ctx context.Context, hash multihash.Multihash, p
 func (m *MockProviderStore) SetExpirable(ctx context.Context, key multihash.Multihash, expires bool) error {
 	panic("unimplemented")
 }
-
-type alternateProviderSubTest struct {
-	name     string
-	provider model.ProviderResult
-}
