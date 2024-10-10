@@ -2,6 +2,7 @@ package testutil
 
 import (
 	crand "crypto/rand"
+	"errors"
 	"io"
 	"math/rand"
 	"net"
@@ -89,6 +90,9 @@ func RandomMultihash() mh.Multihash {
 }
 
 func RandomMultihashes(count int) []mh.Multihash {
+	if count <= 0 {
+		panic(errors.New("count must be greater than 0"))
+	}
 	mhs := make([]mh.Multihash, 0, count)
 	for range count {
 		mhs = append(mhs, RandomMultihash())

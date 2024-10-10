@@ -3,19 +3,27 @@ package providerindex
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"slices"
 
+	cid "github.com/ipfs/go-cid"
+	logging "github.com/ipfs/go-log/v2"
 	"github.com/ipld/go-ipld-prime"
-	"github.com/ipni/go-libipni/announce"
-	"github.com/ipni/go-libipni/dagsync"
+	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
 	ipnifind "github.com/ipni/go-libipni/find/client"
 	"github.com/ipni/go-libipni/find/model"
+	meta "github.com/ipni/go-libipni/metadata"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multicodec"
 	mh "github.com/multiformats/go-multihash"
 	"github.com/storacha/go-ucanto/did"
+	"github.com/storacha/indexing-service/pkg/internal/jobqueue"
 	"github.com/storacha/indexing-service/pkg/metadata"
+	"github.com/storacha/indexing-service/pkg/service/providerindex/publisher"
 	"github.com/storacha/indexing-service/pkg/types"
 )
+
+var log = logging.Logger("providerindex")
 
 type QueryKey struct {
 	Spaces       []did.DID
@@ -27,17 +35,67 @@ type QueryKey struct {
 type ProviderIndex struct {
 	providerStore types.ProviderStore
 	findClient    ipnifind.Finder
+	publisher     publisher.Publisher
 }
 
 // TBD access to legacy systems
 type LegacySystems interface{}
 
-// TODO: This assumes using low level primitives for publishing from IPNI but maybe we want to go ahead and use index-provider?
-func NewProviderIndex(providerStore types.ProviderStore, findClient ipnifind.Finder, sender announce.Sender, publisher dagsync.Publisher, advertisementsLsys ipld.LinkSystem, legacySystems LegacySystems) *ProviderIndex {
+func NewProviderIndex(providerStore types.ProviderStore, findClient ipnifind.Finder, publisher publisher.Publisher, legacySystems LegacySystems) *ProviderIndex {
+	publisher.NotifyRemoteSync(func(ctx context.Context, head, prev ipld.Link) {
+		HandleRemoteSync(ctx, providerStore, publisher, head, prev)
+	})
+
 	return &ProviderIndex{
 		providerStore: providerStore,
 		findClient:    findClient,
+		publisher:     publisher,
 	}
+}
+
+func HandleRemoteSync(ctx context.Context, providerStore types.ProviderStore, publisher publisher.Publisher, head, prev ipld.Link) {
+	log.Infof("handling IPNI remote sync from %s to %s", prev, head)
+
+	q := jobqueue.NewJobQueue(
+		func(ctx context.Context, digest mh.Multihash) error {
+			return providerStore.SetExpirable(ctx, digest, true)
+		},
+		jobqueue.WithConcurrency(5),
+		jobqueue.WithErrorHandler(func(err error) {
+			log.Errorf("setting expirable: %w", err)
+		}),
+	)
+	q.Startup()
+
+	cur := head
+	for {
+		ad, err := publisher.Store().Advert(ctx, cur)
+		if err != nil {
+			log.Errorf("getting advert: %s: %w", cur, err)
+			return
+		}
+		for d, err := range publisher.Store().Entries(ctx, ad.Entries) {
+			if err != nil {
+				log.Errorf("iterating advert entries: %s (advert) -> %s (entries): %w", cur, ad.Entries, err)
+				return
+			}
+			err := q.Queue(ctx, d)
+			if err != nil {
+				log.Errorf("adding digest to queue: %s: %w", d.B58String(), err)
+				return
+			}
+		}
+		if ad.PreviousCid() == cid.Undef || ad.PreviousCid().String() == prev.String() {
+			break
+		}
+		cur = cidlink.Link{Cid: ad.PreviousCid()}
+	}
+
+	err := q.Shutdown(ctx)
+	if err != nil {
+		log.Errorf("shutting down IPNI remote sync job queue: %w", err)
+	}
+	log.Infof("handled IPNI remote sync from %s to %s", prev, head)
 }
 
 // Find should do the following
@@ -134,8 +192,58 @@ func (pi *ProviderIndex) filterBySpace(results []model.ProviderResult, mh mh.Mul
 // Publish should do the following:
 // 1. Write the entries to the cache with no expiration until publishing is complete
 // 2. Generate an advertisement for the advertised hashes and publish/announce it
-func (pi *ProviderIndex) Publish(context.Context, []mh.Multihash, model.ProviderResult) {
+func (pi *ProviderIndex) Publish(ctx context.Context, provider *peer.AddrInfo, contextID string, digests []mh.Multihash, meta meta.Metadata) error {
+	mdb, err := meta.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("marshaling metadata: %w", err)
+	}
 
+	pr := model.ProviderResult{
+		ContextID: []byte(contextID),
+		Metadata:  mdb,
+		Provider:  provider,
+	}
+
+	q := jobqueue.NewJobQueue(
+		func(ctx context.Context, digest mh.Multihash) error {
+			return appendProviderResult(ctx, pi.providerStore, digest, pr)
+		},
+		jobqueue.WithConcurrency(5),
+		jobqueue.WithErrorHandler(func(err error) {
+			log.Errorf("appending provider result: %w", err)
+		}),
+	)
+	q.Startup()
+	for _, d := range digests {
+		err := q.Queue(ctx, d)
+		if err != nil {
+			return err
+		}
+	}
+	q.Shutdown(ctx)
+
+	id, err := pi.publisher.Publish(ctx, provider, contextID, digests, meta)
+	if err != nil {
+		return err
+	}
+	log.Infof("published IPNI advert: %s", id)
+	return nil
+}
+
+// TODO: atomic append...
+func appendProviderResult(ctx context.Context, providerStore types.ProviderStore, digest mh.Multihash, meta model.ProviderResult) error {
+	metas, err := providerStore.Get(ctx, digest)
+	if err != nil {
+		if err != types.ErrKeyNotFound {
+			return fmt.Errorf("getting existing provider results for digest: %s: %w", digest.B58String(), err)
+		}
+	}
+	metas = append(metas, meta)
+	err = providerStore.Set(ctx, digest, metas, false)
+	if err != nil {
+		return fmt.Errorf("setting provider results for digest: %s: %w", digest.B58String(), err)
+	}
+	return nil
 }
 
 func filter(results []model.ProviderResult, filterFunc func(model.ProviderResult) (bool, error)) ([]model.ProviderResult, error) {

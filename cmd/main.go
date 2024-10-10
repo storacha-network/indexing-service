@@ -5,7 +5,9 @@ import (
 	"os"
 
 	logging "github.com/ipfs/go-log/v2"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/storacha/go-ucanto/did"
+	"github.com/storacha/go-ucanto/principal"
 	ed25519 "github.com/storacha/go-ucanto/principal/ed25519/signer"
 	"github.com/storacha/go-ucanto/principal/signer"
 	"github.com/storacha/indexing-service/pkg/server"
@@ -85,9 +87,11 @@ func main() {
 						},
 						Action: func(cCtx *cli.Context) error {
 							addr := fmt.Sprintf(":%d", cCtx.Int("port"))
+							var id principal.Signer
+							var err error
 							var opts []server.Option
 							if cCtx.String("private-key") != "" {
-								id, err := ed25519.Parse(cCtx.String("private-key"))
+								id, err = ed25519.Parse(cCtx.String("private-key"))
 								if err != nil {
 									return fmt.Errorf("parsing server private key: %w", err)
 								}
@@ -110,7 +114,14 @@ func main() {
 							sc.ClaimsDB = cCtx.Int("claims-redis-db")
 							sc.IndexesDB = cCtx.Int("indexes-redis-db")
 							sc.IndexerURL = cCtx.String("ipni-endpoint")
-							indexingService, shutdown, err := service.Construct(sc)
+
+							privKey, err := crypto.UnmarshalEd25519PrivateKey(id.Raw())
+							if err != nil {
+								return fmt.Errorf("unmarshaling private key: %w", err)
+							}
+							sc.PrivateKey = privKey
+
+							indexingService, shutdown, err := service.Construct(cCtx.Context, sc)
 							if err != nil {
 								return err
 							}
